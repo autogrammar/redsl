@@ -13,6 +13,7 @@ Critically:
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -326,7 +327,15 @@ def _smoke_test_provider(provider: str, key: str) -> tuple[bool, str]:
         endpoints: dict[str, tuple[str, dict[str, str]]] = {
             "openrouter": (
                 "https://openrouter.ai/api/v1/models",
-                {"Authorization": f"Bearer {key}", "HTTP-Referer": "redsl-config-agent"},
+                {
+                    "Authorization": f"Bearer {key}",
+                    "HTTP-Referer": os.getenv(
+                        "OPENROUTER_APP_URL", "https://github.com/autogrammar/redsl"
+                    ),
+                    "X-OpenRouter-Title": os.getenv(
+                        "OPENROUTER_APP_NAME", "redsl-config-agent"
+                    ),
+                },
             ),
             "anthropic": (
                 "https://api.anthropic.com/v1/models",

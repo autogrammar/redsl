@@ -577,110 +577,80 @@ def _extract_cc_threshold(title: str, labels: list) -> int | None:
     is_flag=True,
     help="Output result as JSON",
 )
-def planfile_validate(project_path: Path, fix: bool, as_json: bool) -> None:
-    """Check whether planfile.yaml tickets are still current.
+def _extract_tasks(data: dict) -> list:
+    """Return task list from planfile data, supporting both schema versions."""
+    return data.get("tasks") or (data.get("spec") or {}).get("tasks") or []
 
-    For each open task, validates:
-    - File still exists (otherwise: STALE_FILE_MISSING)
-    - For reduce_complexity/extract_functions: current CC re-checked via radon
-      If CC is now below threshold → STALE_FIXED
-    - Whether the action was already applied via history.jsonl → STALE_APPLIED
 
-    \b
-    Examples:
-      redsl planfile validate .
-      redsl planfile validate . --fix
-      redsl planfile validate /path/to/goal --json
-    """
-    import json as _json
-    import re
-
-    planfile = Path(project_path) / "planfile.yaml"
-    if not planfile.exists():
-        raise click.ClickException(
-            f"planfile.yaml not found at {planfile}. Run: redsl planfile sync ."
-        )
-
-    data = yaml.safe_load(planfile.read_text(encoding="utf-8")) or {}
-
-    # Support both planfile schema versions
-    tasks = data.get("tasks") or (data.get("spec") or {}).get("tasks") or []
-    if not tasks:
-        click.echo("No tasks in planfile.yaml.")
-        return
-
-    # Load history for applied files
+def _load_applied_pairs(project_path: Path) -> set[tuple[str, str]]:
+    """Load already-applied (file, action) pairs from .redsl/history.jsonl."""
     applied_pairs: set[tuple[str, str]] = set()
     history_file = Path(project_path) / ".redsl" / "history.jsonl"
-    if history_file.exists():
-        for line in history_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
-            if ev.get("event_type") == "proposal_applied":
-                tf = ev.get("target_file") or ""
-                action = ev.get("action") or ""
-                if tf and action:
-                    applied_pairs.add((tf, action))
-
-    results = []
-    stale_ids: list[str] = []
-
-    for task in tasks:
-        if not isinstance(task, dict):
+    if not history_file.exists():
+        return applied_pairs
+    for line in history_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
             continue
-        status = task.get("status", "todo")
-        if status in ("done", "closed"):
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
             continue
+        if ev.get("event_type") == "proposal_applied":
+            tf = ev.get("target_file") or ""
+            action = ev.get("action") or ""
+            if tf and action:
+                applied_pairs.add((tf, action))
+    return applied_pairs
 
-        tid = task.get("id", "?")
-        title = task.get("title", "")
-        file_rel = task.get("file", "")
-        action = task.get("action", "")
-        labels = task.get("labels") or []
 
-        verdict = "ok"
-        reason = ""
+def _evaluate_task(
+    task: dict,
+    project_path: Path,
+    applied_pairs: set[tuple[str, str]],
+) -> dict:
+    """Evaluate one open planfile task and return a result entry dict."""
+    tid = task.get("id", "?")
+    title = task.get("title", "")
+    file_rel = task.get("file", "")
+    action = task.get("action", "")
+    labels = task.get("labels") or []
 
-        if file_rel:
-            abs_file = Path(project_path) / file_rel
-            if not abs_file.exists():
-                verdict = "stale_file_missing"
-                reason = f"File not found: {file_rel}"
-            elif (file_rel, action) in applied_pairs:
-                verdict = "stale_applied"
-                reason = f"action={action} already applied to {file_rel} (found in history.jsonl)"
-            elif action in ("reduce_complexity", "extract_functions", "split_module"):
-                threshold = _extract_cc_threshold(title, labels)
-                if threshold is not None:
-                    current_cc = _get_current_cc(abs_file)
-                    if current_cc is not None and current_cc < threshold:
-                        verdict = "stale_fixed"
-                        reason = f"CC now {current_cc} (was ~{threshold} when ticket created)"
-                    elif current_cc is not None:
-                        reason = f"CC still {current_cc} (threshold {threshold})"
-        else:
-            reason = "no file reference"
+    verdict = "ok"
+    reason = ""
 
-        results.append({
-            "id": tid,
-            "title": title,
-            "file": file_rel,
-            "action": action,
-            "verdict": verdict,
-            "reason": reason,
-        })
-        if verdict.startswith("stale"):
-            stale_ids.append(tid)
+    if file_rel:
+        abs_file = Path(project_path) / file_rel
+        if not abs_file.exists():
+            verdict = "stale_file_missing"
+            reason = f"File not found: {file_rel}"
+        elif (file_rel, action) in applied_pairs:
+            verdict = "stale_applied"
+            reason = f"action={action} already applied to {file_rel} (found in history.jsonl)"
+        elif action in ("reduce_complexity", "extract_functions", "split_module"):
+            threshold = _extract_cc_threshold(title, labels)
+            if threshold is not None:
+                current_cc = _get_current_cc(abs_file)
+                if current_cc is not None and current_cc < threshold:
+                    verdict = "stale_fixed"
+                    reason = f"CC now {current_cc} (was ~{threshold} when ticket created)"
+                elif current_cc is not None:
+                    reason = f"CC still {current_cc} (threshold {threshold})"
+    else:
+        reason = "no file reference"
 
-    if as_json:
-        click.echo(_json.dumps({"project": str(project_path), "tasks_checked": len(results), "results": results}, indent=2, ensure_ascii=False))
-        return
+    return {
+        "id": tid,
+        "title": title,
+        "file": file_rel,
+        "action": action,
+        "verdict": verdict,
+        "reason": reason,
+    }
 
+
+def _print_validate_report(project_path: Path, results: list[dict]) -> None:
+    """Print the human-readable validate report."""
     ok_count = sum(1 for r in results if r["verdict"] == "ok")
     stale_count = len(results) - ok_count
 
@@ -704,17 +674,77 @@ def planfile_validate(project_path: Path, fix: bool, as_json: bool) -> None:
         if r["reason"]:
             click.echo(f"               → {r['reason']}")
 
+
+def _mark_stale_tasks(data: dict, stale_ids: list[str]) -> int:
+    """Mark stale task ids as 'stale' in the loaded planfile data in-place."""
+    task_list = _extract_tasks(data)
+    patched = 0
+    for task in task_list:
+        if not isinstance(task, dict):
+            continue
+        if task.get("id") in stale_ids:
+            task["status"] = "stale"
+            patched += 1
+    return patched
+
+
+def planfile_validate(project_path: Path, fix: bool, as_json: bool) -> None:
+    """Check whether planfile.yaml tickets are still current.
+
+    For each open task, validates:
+    - File still exists (otherwise: STALE_FILE_MISSING)
+    - For reduce_complexity/extract_functions: current CC re-checked via radon
+      If CC is now below threshold → STALE_FIXED
+    - Whether the action was already applied via history.jsonl → STALE_APPLIED
+
+    \b
+    Examples:
+      redsl planfile validate .
+      redsl planfile validate . --fix
+      redsl planfile validate /path/to/goal --json
+    """
+    planfile = Path(project_path) / "planfile.yaml"
+    if not planfile.exists():
+        raise click.ClickException(
+            f"planfile.yaml not found at {planfile}. Run: redsl planfile sync ."
+        )
+
+    data = yaml.safe_load(planfile.read_text(encoding="utf-8")) or {}
+
+    # Support both planfile schema versions
+    tasks = _extract_tasks(data)
+    if not tasks:
+        click.echo("No tasks in planfile.yaml.")
+        return
+
+    applied_pairs = _load_applied_pairs(project_path)
+
+    results = []
+    stale_ids: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if task.get("status", "todo") in ("done", "closed"):
+            continue
+        entry = _evaluate_task(task, project_path, applied_pairs)
+        results.append(entry)
+        if entry["verdict"].startswith("stale"):
+            stale_ids.append(entry["id"])
+
+    if as_json:
+        click.echo(json.dumps(
+            {"project": str(project_path), "tasks_checked": len(results), "results": results},
+            indent=2,
+            ensure_ascii=False,
+        ))
+        return
+
+    _print_validate_report(project_path, results)
+
+    stale_count = len(stale_ids)
     if stale_count and fix:
         click.echo()
-        # Patch the planfile data
-        task_list = data.get("tasks") or (data.get("spec") or {}).get("tasks") or []
-        patched = 0
-        for task in task_list:
-            if not isinstance(task, dict):
-                continue
-            if task.get("id") in stale_ids:
-                task["status"] = "stale"
-                patched += 1
+        patched = _mark_stale_tasks(data, stale_ids)
         planfile.write_text(
             yaml.safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False),
             encoding="utf-8",

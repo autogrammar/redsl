@@ -183,6 +183,64 @@ def _run_reflect_phase(
     _reflect_on_cycle(orchestrator, report)
 
 
+def _run_push_action(
+    deploy_cfg: "Any",
+    detected: "Any",
+    project_dir: Path,
+    report: "CycleReport",
+    history: "HistoryWriter | None",
+    dry_run: bool,
+) -> None:
+    """Run the git push deploy action if configured and detected."""
+    from redsl.execution.deploy_detector import run_deploy_action
+
+    should_push = (
+        deploy_cfg.push is True or
+        (deploy_cfg.push == "auto" and detected.push.method != "none")
+    )
+    if should_push and detected.push.method != "none":
+        push_ok = run_deploy_action(detected.push, project_dir, dry_run=dry_run)
+        if history:
+            history.record_event(
+                "deploy_push",
+                cycle_number=report.cycle_number,
+                status="ok" if push_ok else "error",
+                thought=f"git push {'succeeded' if push_ok else 'failed'}: {detected.push.label}",
+                details={"method": detected.push.method, "label": detected.push.label, "dry_run": dry_run},
+            )
+    elif should_push:
+        logger.debug("deploy: push requested but no mechanism detected in %s", project_dir.name)
+
+
+def _run_publish_action(
+    deploy_cfg: "Any",
+    detected: "Any",
+    project_dir: Path,
+    report: "CycleReport",
+    history: "HistoryWriter | None",
+    dry_run: bool,
+) -> None:
+    """Run the registry/PyPI publish deploy action if configured and detected."""
+    from redsl.execution.deploy_detector import run_deploy_action
+
+    should_publish = (
+        deploy_cfg.publish is True or
+        (deploy_cfg.publish == "auto" and detected.publish.method != "none")
+    )
+    if should_publish and detected.publish.method != "none":
+        publish_ok = run_deploy_action(detected.publish, project_dir, dry_run=dry_run)
+        if history:
+            history.record_event(
+                "deploy_publish",
+                cycle_number=report.cycle_number,
+                status="ok" if publish_ok else "error",
+                thought=f"publish {'succeeded' if publish_ok else 'failed'}: {detected.publish.label}",
+                details={"method": detected.publish.method, "label": detected.publish.label, "dry_run": dry_run},
+            )
+    elif should_publish:
+        logger.debug("deploy: publish requested but no mechanism detected in %s", project_dir.name)
+
+
 def _run_deploy_phase(
     project_dir: Path,
     report: "CycleReport",
@@ -198,7 +256,7 @@ def _run_deploy_phase(
     - ``publish: auto/true/false`` — registry/PyPI publish
     - ``on_success_only: true`` — skip if cycle applied 0 actions
     """
-    from redsl.execution.deploy_detector import detect_deploy_config, run_deploy_action
+    from redsl.execution.deploy_detector import detect_deploy_config
 
     deploy_cfg = workflow.deploy
     logger.info("=== CYCLE %d: DEPLOY ===", report.cycle_number)
@@ -222,41 +280,8 @@ def _run_deploy_phase(
             ", ".join(detected.ci_workflow_files),
         )
 
-    # Resolve push
-    should_push = (
-        deploy_cfg.push is True or
-        (deploy_cfg.push == "auto" and detected.push.method != "none")
-    )
-    if should_push and detected.push.method != "none":
-        push_ok = run_deploy_action(detected.push, project_dir, dry_run=dry_run)
-        if history:
-            history.record_event(
-                "deploy_push",
-                cycle_number=report.cycle_number,
-                status="ok" if push_ok else "error",
-                thought=f"git push {'succeeded' if push_ok else 'failed'}: {detected.push.label}",
-                details={"method": detected.push.method, "label": detected.push.label, "dry_run": dry_run},
-            )
-    elif should_push:
-        logger.debug("deploy: push requested but no mechanism detected in %s", project_dir.name)
-
-    # Resolve publish
-    should_publish = (
-        deploy_cfg.publish is True or
-        (deploy_cfg.publish == "auto" and detected.publish.method != "none")
-    )
-    if should_publish and detected.publish.method != "none":
-        publish_ok = run_deploy_action(detected.publish, project_dir, dry_run=dry_run)
-        if history:
-            history.record_event(
-                "deploy_publish",
-                cycle_number=report.cycle_number,
-                status="ok" if publish_ok else "error",
-                thought=f"publish {'succeeded' if publish_ok else 'failed'}: {detected.publish.label}",
-                details={"method": detected.publish.method, "label": detected.publish.label, "dry_run": dry_run},
-            )
-    elif should_publish:
-        logger.debug("deploy: publish requested but no mechanism detected in %s", project_dir.name)
+    _run_push_action(deploy_cfg, detected, project_dir, report, history, dry_run)
+    _run_publish_action(deploy_cfg, detected, project_dir, report, history, dry_run)
 
 
 def run_cycle(

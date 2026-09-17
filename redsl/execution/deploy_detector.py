@@ -105,9 +105,6 @@ def _detect_from_pyqual(project_dir: Path) -> tuple[DeployAction, DeployAction]:
         return DeployAction(), DeployAction()
 
     stages = data.get("pipeline", {}).get("stages", [])
-    push_action = DeployAction()
-    publish_action = DeployAction()
-
     pyqual_exe = _exe_in_project("pyqual", project_dir) or "pyqual"
 
     for stage in stages:
@@ -156,9 +153,6 @@ def _detect_from_taskfile(project_dir: Path) -> tuple[DeployAction, DeployAction
     tasks = data.get("tasks", {})
     task_exe = shutil.which("task") or "task"
 
-    push_action = DeployAction()
-    publish_action = DeployAction()
-
     if "push" in tasks:
         push_action = DeployAction(
             method="task",
@@ -191,9 +185,6 @@ def _detect_from_makefile(project_dir: Path) -> tuple[DeployAction, DeployAction
         return DeployAction(), DeployAction()
 
     make_exe = shutil.which("make") or "make"
-    push_action = DeployAction()
-    publish_action = DeployAction()
-
     import re
     targets = re.findall(r"^([a-zA-Z_-]+)\s*:", content, re.MULTILINE)
 
@@ -219,9 +210,6 @@ def _detect_from_makefile(project_dir: Path) -> tuple[DeployAction, DeployAction
 
 def _detect_from_scripts(project_dir: Path) -> tuple[DeployAction, DeployAction]:
     """Detect push/publish scripts in scripts/, bin/, or root-level sh files."""
-    push_action = DeployAction()
-    publish_action = DeployAction()
-
     # Candidate scripts per action
     push_candidates: list[Path] = []
     publish_candidates: list[Path] = []
@@ -247,29 +235,25 @@ def _detect_from_scripts(project_dir: Path) -> tuple[DeployAction, DeployAction]
             elif "publish" in stem or "release" in stem:
                 publish_candidates.append(f)
 
-    if push_candidates:
-        script = push_candidates[0]
-        cmd = ["bash", str(script)] if script.suffix == ".sh" else [str(script)]
-        push_action = DeployAction(
-            method="script",
-            command=cmd,
-            when="on_success",
-            optional=True,
-            label=script.relative_to(project_dir).as_posix(),
-        )
+    return (
+        _script_action(push_candidates, project_dir),
+        _script_action(publish_candidates, project_dir),
+    )
 
-    if publish_candidates:
-        script = publish_candidates[0]
-        cmd = ["bash", str(script)] if script.suffix == ".sh" else [str(script)]
-        publish_action = DeployAction(
-            method="script",
-            command=cmd,
-            when="on_success",
-            optional=True,
-            label=script.relative_to(project_dir).as_posix(),
-        )
 
-    return push_action, publish_action
+def _script_action(candidates: list[Path], project_dir: Path) -> DeployAction:
+    """Build a DeployAction for the first matching script candidate."""
+    if not candidates:
+        return DeployAction()
+    script = candidates[0]
+    cmd = ["bash", str(script)] if script.suffix == ".sh" else [str(script)]
+    return DeployAction(
+        method="script",
+        command=cmd,
+        when="on_success",
+        optional=True,
+        label=script.relative_to(project_dir).as_posix(),
+    )
 
 
 def _detect_ci_workflows(project_dir: Path) -> tuple[bool, list[str]]:

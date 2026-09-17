@@ -310,42 +310,23 @@ def add_decision_tasks(
 
     added = 0
     for decision in decisions:
-        target_file = str(getattr(decision, "target_file", ""))
-        action = str(getattr(getattr(decision, "action", None), "value", "") or getattr(decision, "action", ""))
-        score = float(getattr(decision, "score", 0))
-        rationale = str(getattr(decision, "rationale", "") or "")
-        rule_name = str(getattr(decision, "rule_name", "") or "")
-
-        if (target_file, action) in existing:
+        new_task = _decision_to_task(
+            decision, now_iso, len(tasks) + added + 1, priority, source
+        )
+        key = (new_task["file"], new_task["action"])
+        if key in existing:
             logger.debug(
                 "planfile_updater: skip duplicate decision task file=%s action=%s",
-                target_file, action,
+                key[0], key[1],
             )
             continue
 
-        task_id = f"refactor-{now_iso[:10]}-{len(tasks) + added + 1:03d}"
-        new_task: dict = {
-            "id": task_id,
-            "title": f"{action}: {Path(target_file).name}",
-            "status": "todo",
-            "action": action,
-            "file": target_file,
-            "priority": priority,
-            "score": round(score, 2),
-            "created_at": now_iso,
-            "source": source,
-        }
-        if rationale:
-            new_task["description"] = rationale[:200]
-        if rule_name:
-            new_task["rule"] = rule_name
-
         tasks.append(new_task)
-        existing.add((target_file, action))
+        existing.add(key)
         added += 1
         logger.info(
             "planfile_updater: added decision task [%s] %s → %s",
-            task_id, action, target_file,
+            new_task["id"], new_task["action"], new_task["file"],
         )
 
     if added:
@@ -369,3 +350,35 @@ def add_decision_tasks(
             return 0
 
     return added
+
+
+def _decision_to_task(
+    decision: Any,
+    now_iso: str,
+    seq: int,
+    priority: int,
+    source: str,
+) -> dict:
+    """Build a planfile task dict from a refactor decision."""
+    target_file = str(getattr(decision, "target_file", ""))
+    action = str(getattr(getattr(decision, "action", None), "value", "") or getattr(decision, "action", ""))
+    score = float(getattr(decision, "score", 0))
+    rationale = str(getattr(decision, "rationale", "") or "")
+    rule_name = str(getattr(decision, "rule_name", "") or "")
+
+    new_task: dict = {
+        "id": f"refactor-{now_iso[:10]}-{seq:03d}",
+        "title": f"{action}: {Path(target_file).name}",
+        "status": "todo",
+        "action": action,
+        "file": target_file,
+        "priority": priority,
+        "score": round(score, 2),
+        "created_at": now_iso,
+        "source": source,
+    }
+    if rationale:
+        new_task["description"] = rationale[:200]
+    if rule_name:
+        new_task["rule"] = rule_name
+    return new_task

@@ -61,165 +61,124 @@ class CommandHandler(ABC):
         ...
 
 
+def _alert_to_dict(a: Any) -> dict[str, Any]:
+    get = (lambda k, d: a.get(k, d)) if isinstance(a, dict) else (lambda k, d: getattr(a, k, d))
+    return {
+        'type': get('type', 'unknown'),
+        'name': get('name', 'unknown'),
+        'severity': get('severity', 1),
+        'value': get('value', 0),
+        'limit': get('limit', 10),
+        'message': get('message', ''),
+    }
+
+
 class ScanRemoteHandler(CommandHandler):
     """Handler for ScanRemoteCommand."""
-    
+
+    async def _emit(self, event: Any, notify: bool) -> None:
+        await event_store.append(event)
+        if notify:
+            await ws_manager.broadcast_event(event.to_dict())
+
+    async def _progress(
+        self, command: ScanRemoteCommand, aggregate_id: str,
+        phase: str, percent: int, message: str,
+    ) -> None:
+        await self._emit(ScanProgress(
+            aggregate_id=aggregate_id,
+            repo_url=command.repo_url,
+            phase=phase,
+            progress_percent=percent,
+            message=message,
+        ), command.notify_ws)
+
+    async def _fail(
+        self, command: ScanRemoteCommand, aggregate_id: str,
+        message: str, error_type: str,
+    ) -> dict[str, Any]:
+        await self._emit(ScanFailed(
+            aggregate_id=aggregate_id,
+            repo_url=command.repo_url,
+            error_message=message,
+            error_type=error_type,
+        ), command.notify_ws)
+        return {"status": "error", "detail": message}
+
+    async def _analyze_repo(
+        self, command: ScanRemoteCommand, aggregate_id: str, repo_path: Path
+    ) -> dict[str, Any]:
+        """Run analysis, emit completion events, return result payload."""
+        from redsl.analyzers import CodeAnalyzer
+        from redsl.api.scan_routes import _extract_top_issues, _generate_summary
+
+        await self._progress(command, aggregate_id, "analyze", 50, "Analyzing code...")
+
+        analysis = await asyncio.to_thread(CodeAnalyzer().analyze_project, repo_path)
+        logger.info("ScanRemoteHandler: Analysis completed, alerts_count=%d", len(analysis.alerts))
+
+        alerts_list = [_alert_to_dict(a) for a in (analysis.alerts or [])]
+        analysis_dict = {
+            'total_files': getattr(analysis, 'total_files', 0),
+            'total_lines': getattr(analysis, 'total_lines', 0),
+            'avg_cc': getattr(analysis, 'avg_cc', 0),
+            'critical_count': getattr(analysis, 'critical_count', 0),
+            'alerts': alerts_list,
+        }
+        top_issues = _extract_top_issues(analysis_dict)
+        summary = _generate_summary(analysis_dict)
+
+        await self._progress(command, aggregate_id, "complete", 100, "Analysis complete!")
+
+        await self._emit(ScanCompleted(
+            aggregate_id=aggregate_id,
+            repo_url=command.repo_url,
+            total_files=analysis_dict['total_files'],
+            total_lines=analysis_dict['total_lines'],
+            avg_cc=analysis_dict['avg_cc'],
+            critical_count=analysis_dict['critical_count'],
+            alerts=alerts_list,
+            top_issues=top_issues,
+            summary=summary,
+        ), command.notify_ws)
+
+        return {
+            "status": "success",
+            "repo_url": command.repo_url,
+            **analysis_dict,
+            "top_issues": top_issues,
+            "summary": summary,
+        }
+
     async def handle(self, command: ScanRemoteCommand) -> dict[str, Any]:
         """Execute remote scan with event sourcing."""
-        from redsl.analyzers import CodeAnalyzer
         from redsl.api.scan_routes import _clone_repo, _cleanup_repo, _validate_repo_url
-        
+
         aggregate_id = f"scan:{command.repo_url}"
-        
-        # Emit started event
-        started = ScanStarted(
+
+        await self._emit(ScanStarted(
             aggregate_id=aggregate_id,
             repo_url=command.repo_url,
             branch=command.branch,
             depth=command.depth,
-        )
-        await event_store.append(started)
-        
-        if command.notify_ws:
-            await ws_manager.broadcast_event(started.to_dict())
-        
-        # Validate URL
+        ), command.notify_ws)
+
         if not _validate_repo_url(command.repo_url):
-            failed = ScanFailed(
-                aggregate_id=aggregate_id,
-                repo_url=command.repo_url,
-                error_message="Invalid repository URL",
-                error_type="validation_error",
-            )
-            await event_store.append(failed)
-            if command.notify_ws:
-                await ws_manager.broadcast_event(failed.to_dict())
-            return {"status": "error", "detail": "Invalid repository URL"}
-        
-        # Progress: cloning
-        progress_clone = ScanProgress(
-            aggregate_id=aggregate_id,
-            repo_url=command.repo_url,
-            phase="clone",
-            progress_percent=10,
-            message="Cloning repository...",
-        )
-        await event_store.append(progress_clone)
-        if command.notify_ws:
-            await ws_manager.broadcast_event(progress_clone.to_dict())
-        
-        # Clone repository
+            return await self._fail(command, aggregate_id, "Invalid repository URL", "validation_error")
+
+        await self._progress(command, aggregate_id, "clone", 10, "Cloning repository...")
+
         repo_path = await asyncio.to_thread(
             _clone_repo, command.repo_url, command.branch, command.depth
         )
-        
         if repo_path is None:
-            failed = ScanFailed(
-                aggregate_id=aggregate_id,
-                repo_url=command.repo_url,
-                error_message="Failed to clone repository",
-                error_type="clone_error",
-            )
-            await event_store.append(failed)
-            if command.notify_ws:
-                await ws_manager.broadcast_event(failed.to_dict())
-            return {"status": "error", "detail": "Failed to clone repository"}
-        
+            return await self._fail(command, aggregate_id, "Failed to clone repository", "clone_error")
+
         try:
-            # Progress: analyzing
-            progress_analyze = ScanProgress(
-                aggregate_id=aggregate_id,
-                repo_url=command.repo_url,
-                phase="analyze",
-                progress_percent=50,
-                message="Analyzing code...",
-            )
-            await event_store.append(progress_analyze)
-            if command.notify_ws:
-                await ws_manager.broadcast_event(progress_analyze.to_dict())
-            
-            # Analyze
-            analyzer = CodeAnalyzer()
-            analysis = await asyncio.to_thread(analyzer.analyze_project, repo_path)
-            
-            logger.info("ScanRemoteHandler: Analysis completed, alerts_count=%d", len(analysis.alerts))
-            
-            # Convert alerts to dicts
-            alerts_list = [
-                {
-                    'type': a.get('type', 'unknown') if isinstance(a, dict) else getattr(a, 'type', 'unknown'),
-                    'name': a.get('name', 'unknown') if isinstance(a, dict) else getattr(a, 'name', 'unknown'),
-                    'severity': a.get('severity', 1) if isinstance(a, dict) else getattr(a, 'severity', 1),
-                    'value': a.get('value', 0) if isinstance(a, dict) else getattr(a, 'value', 0),
-                    'limit': a.get('limit', 10) if isinstance(a, dict) else getattr(a, 'limit', 10),
-                    'message': a.get('message', '') if isinstance(a, dict) else getattr(a, 'message', ''),
-                }
-                for a in (analysis.alerts or [])
-            ]
-            
-            # Extract top issues
-            from redsl.api.scan_routes import _extract_top_issues, _generate_summary
-            analysis_dict = {
-                'total_files': getattr(analysis, 'total_files', 0),
-                'total_lines': getattr(analysis, 'total_lines', 0),
-                'avg_cc': getattr(analysis, 'avg_cc', 0),
-                'critical_count': getattr(analysis, 'critical_count', 0),
-                'alerts': alerts_list,
-            }
-            top_issues = _extract_top_issues(analysis_dict)
-            summary = _generate_summary(analysis_dict)
-            
-            # Progress: complete
-            progress_complete = ScanProgress(
-                aggregate_id=aggregate_id,
-                repo_url=command.repo_url,
-                phase="complete",
-                progress_percent=100,
-                message="Analysis complete!",
-            )
-            await event_store.append(progress_complete)
-            if command.notify_ws:
-                logger.info("ScanRemoteHandler: Broadcasting complete progress event")
-                await ws_manager.broadcast_event(progress_complete.to_dict())
-            
-            # Emit completed event
-            completed = ScanCompleted(
-                aggregate_id=aggregate_id,
-                repo_url=command.repo_url,
-                total_files=analysis_dict['total_files'],
-                total_lines=analysis_dict['total_lines'],
-                avg_cc=analysis_dict['avg_cc'],
-                critical_count=analysis_dict['critical_count'],
-                alerts=alerts_list,
-                top_issues=top_issues,
-                summary=summary,
-            )
-            await event_store.append(completed)
-            if command.notify_ws:
-                logger.info("ScanRemoteHandler: Broadcasting ScanCompleted event with %d alerts", len(alerts_list))
-                await ws_manager.broadcast_event(completed.to_dict())
-            
-            return {
-                "status": "success",
-                "repo_url": command.repo_url,
-                **analysis_dict,
-                "top_issues": top_issues,
-                "summary": summary,
-            }
-            
+            return await self._analyze_repo(command, aggregate_id, repo_path)
         except Exception as e:
             logger.exception("Analysis error")
-            failed = ScanFailed(
-                aggregate_id=aggregate_id,
-                repo_url=command.repo_url,
-                error_message=f"Analysis failed: {str(e)}",
-                error_type="analysis_error",
-            )
-            await event_store.append(failed)
-            if command.notify_ws:
-                await ws_manager.broadcast_event(failed.to_dict())
-            return {"status": "error", "detail": f"Analysis failed: {str(e)}"}
-            
+            return await self._fail(command, aggregate_id, f"Analysis failed: {e}", "analysis_error")
         finally:
             await asyncio.to_thread(_cleanup_repo, repo_path)
 

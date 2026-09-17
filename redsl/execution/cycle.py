@@ -284,6 +284,115 @@ def _run_deploy_phase(
     _run_publish_action(deploy_cfg, detected, project_dir, report, history, dry_run)
 
 
+def _configure_chat_log(
+    orchestrator: "RefactorOrchestrator",
+    project_dir: Path,
+    wf: "WorkflowConfig",
+) -> None:
+    """Configure LLM chat log path if storage is enabled."""
+    if wf.storage.chat_log_enabled and hasattr(orchestrator, "llm"):
+        chat_log = project_dir / wf.storage.base_dir / wf.storage.chat_log_filename
+        orchestrator.llm.set_chat_log(chat_log)
+        logger.debug("chat_log: %s", chat_log)
+
+
+def _resolve_cycle_flags(
+    wf: "WorkflowConfig",
+    max_actions: int,
+    use_code2llm: bool,
+    use_sandbox: bool,
+    rollback_on_failure: bool,
+    run_tests: bool,
+) -> tuple[int, bool, bool, bool, bool]:
+    """Resolve CLI flags against workflow defaults."""
+    tests_step = wf.validate.get_step("tests")
+    return (
+        max_actions if max_actions != 5 else wf.decide.max_actions,
+        use_code2llm or wf.perceive.use_code2llm,
+        use_sandbox or wf.execute.use_sandbox,
+        rollback_on_failure or wf.execute.rollback_on_failure,
+        run_tests or (tests_step is not None and bool(tests_step.enabled)),
+    )
+
+
+def _record_cycle_started(
+    orchestrator: "RefactorOrchestrator",
+    project_dir: Path,
+    wf: "WorkflowConfig",
+    max_actions: int,
+    use_code2llm: bool,
+    rollback_on_failure: bool,
+    use_sandbox: bool,
+) -> None:
+    """Record cycle start — snapshot of key config for post-mortem."""
+    llm_cfg = getattr(getattr(orchestrator, "config", None), "llm", None)
+    llm_model_name = llm_cfg.model if llm_cfg else "unknown"
+    if wf.decide.llm_model != "auto":
+        llm_model_name = wf.decide.llm_model
+    orchestrator.history.record_event(
+        "cycle_started",
+        cycle_number=orchestrator._cycle_count,
+        thought=f"project={project_dir.name} max_actions={max_actions} model={llm_model_name}",
+        details={
+            "project_dir": str(project_dir),
+            "max_actions": max_actions,
+            "llm_model": llm_model_name,
+            "llm_temperature": wf.decide.llm_temperature,
+            "workflow_source": wf.source,
+            "workflow_name": wf.name,
+            "use_code2llm": use_code2llm,
+            "rollback_on_failure": rollback_on_failure,
+            "use_sandbox": use_sandbox,
+        },
+    )
+
+
+def _record_cycle_completed(
+    orchestrator: "RefactorOrchestrator",
+    project_dir: Path,
+    report: "CycleReport",
+) -> None:
+    """Record cycle outcome regardless of success/failure."""
+    orchestrator.history.record_event(
+        "cycle_completed",
+        cycle_number=orchestrator._cycle_count,
+        status="ok" if not report.errors else "error",
+        thought=(
+            f"applied={report.proposals_applied}/{report.proposals_generated} "
+            f"decisions={report.decisions_count} errors={len(report.errors)}"
+        ),
+        details={
+            "project_dir": str(project_dir),
+            "proposals_generated": report.proposals_generated,
+            "proposals_applied": report.proposals_applied,
+            "proposals_rejected": report.proposals_rejected,
+            "decisions_count": report.decisions_count,
+            "errors": report.errors[:5],
+            "analysis_summary": report.analysis_summary,
+        },
+    )
+
+
+def _handle_cycle_error(
+    orchestrator: "RefactorOrchestrator",
+    project_dir: Path,
+    report: "CycleReport",
+    error: Exception,
+) -> None:
+    """Log cycle failure and restore backed-up files."""
+    logger.error("Cycle %d failed: %s", orchestrator._cycle_count, error)
+    report.errors.append(str(error))
+    rolled_back = rollback_from_backups(project_dir)
+    if rolled_back:
+        logger.info("Rolled back %d file(s) from backups", rolled_back)
+        orchestrator.history.record_event(
+            "cycle_rollback",
+            cycle_number=orchestrator._cycle_count,
+            thought=f"Rolled back {rolled_back} file(s) after error: {error}",
+            details={"files_rolled_back": rolled_back, "error": str(error)},
+        )
+
+
 def run_cycle(
     orchestrator: "RefactorOrchestrator",
     project_dir: Path,
@@ -302,48 +411,20 @@ def run_cycle(
     which searches for ``redsl.yaml`` in the project, then falls back to
     the bundled default.
     """
-    from redsl.execution.workflow import WorkflowConfig, load_workflow
+    from redsl.execution.workflow import load_workflow
 
-    wf: WorkflowConfig = workflow or load_workflow(project_dir)
+    wf = workflow or load_workflow(project_dir)
     logger.debug("workflow: using '%s' (source: %s)", wf.name, wf.source)
 
-    # Configure LLM chat log path if storage is enabled
-    if wf.storage.chat_log_enabled and hasattr(orchestrator, "llm"):
-        chat_log = project_dir / wf.storage.base_dir / wf.storage.chat_log_filename
-        orchestrator.llm.set_chat_log(chat_log)
-        logger.debug("chat_log: %s", chat_log)
-
-    # CLI flags override workflow defaults when explicitly passed
-    _max_actions = max_actions if max_actions != 5 else wf.decide.max_actions
-    _use_code2llm = use_code2llm or wf.perceive.use_code2llm
-    _use_sandbox = use_sandbox or wf.execute.use_sandbox
-    _rollback = rollback_on_failure or wf.execute.rollback_on_failure
-    _run_tests = run_tests or (wf.validate.get_step("tests") is not None
-                               and bool(wf.validate.get_step("tests").enabled))  # type: ignore[union-attr]
+    _configure_chat_log(orchestrator, project_dir, wf)
+    _max_actions, _use_code2llm, _use_sandbox, _rollback, _run_tests = _resolve_cycle_flags(
+        wf, max_actions, use_code2llm, use_sandbox, rollback_on_failure, run_tests
+    )
 
     orchestrator._cycle_count += 1
     report = _new_cycle_report(orchestrator)
-
-    # Record cycle start — snapshot of key config for post-mortem
-    _llm_model = getattr(getattr(orchestrator, "config", None), "llm", None)
-    _llm_model_name = _llm_model.model if _llm_model else "unknown"
-    if wf.decide.llm_model != "auto":
-        _llm_model_name = wf.decide.llm_model
-    orchestrator.history.record_event(
-        "cycle_started",
-        cycle_number=orchestrator._cycle_count,
-        thought=f"project={project_dir.name} max_actions={_max_actions} model={_llm_model_name}",
-        details={
-            "project_dir": str(project_dir),
-            "max_actions": _max_actions,
-            "llm_model": _llm_model_name,
-            "llm_temperature": wf.decide.llm_temperature,
-            "workflow_source": wf.source,
-            "workflow_name": wf.name,
-            "use_code2llm": _use_code2llm,
-            "rollback_on_failure": _rollback,
-            "use_sandbox": _use_sandbox,
-        },
+    _record_cycle_started(
+        orchestrator, project_dir, wf, _max_actions, _use_code2llm, _rollback, _use_sandbox
     )
 
     try:
@@ -370,39 +451,9 @@ def run_cycle(
         cleanup_backups(project_dir)
 
     except Exception as e:
-        logger.error("Cycle %d failed: %s", orchestrator._cycle_count, e)
-        report.errors.append(str(e))
-        # Failed cycle — restore backed-up files
-        rolled_back = rollback_from_backups(project_dir)
-        if rolled_back:
-            logger.info("Rolled back %d file(s) from backups", rolled_back)
-            orchestrator.history.record_event(
-                "cycle_rollback",
-                cycle_number=orchestrator._cycle_count,
-                thought=f"Rolled back {rolled_back} file(s) after error: {e}",
-                details={"files_rolled_back": rolled_back, "error": str(e)},
-            )
+        _handle_cycle_error(orchestrator, project_dir, report, e)
 
-    # Record cycle outcome regardless of success/failure
-    orchestrator.history.record_event(
-        "cycle_completed",
-        cycle_number=orchestrator._cycle_count,
-        status="ok" if not report.errors else "error",
-        thought=(
-            f"applied={report.proposals_applied}/{report.proposals_generated} "
-            f"decisions={report.decisions_count} errors={len(report.errors)}"
-        ),
-        details={
-            "project_dir": str(project_dir),
-            "proposals_generated": report.proposals_generated,
-            "proposals_applied": report.proposals_applied,
-            "proposals_rejected": report.proposals_rejected,
-            "decisions_count": report.decisions_count,
-            "errors": report.errors[:5],
-            "analysis_summary": report.analysis_summary,
-        },
-    )
-
+    _record_cycle_completed(orchestrator, project_dir, report)
     return report
 
 
@@ -451,7 +502,7 @@ def run_from_toon_content(
         try:
             proposal = orchestrator.refactor_engine.generate_proposal(decision, source)
             proposal = orchestrator.refactor_engine.reflect_on_proposal(proposal, source)
-            result = orchestrator.refactor_engine.validate_proposal(proposal, project_dir=project_dir)
+            result = orchestrator.refactor_engine.validate_proposal(proposal)
             report.results.append(result)
             report.proposals_generated += 1
 

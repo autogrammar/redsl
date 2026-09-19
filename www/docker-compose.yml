@@ -29,7 +29,7 @@ services:
 
   # ── MySQL ───────────────────────────────────────────────────────
   db:
-    image: mysql:8.0
+    image: mysql:8.0@sha256:d1e46dc1348fccabc886f8d6da994009b7086947c6736a557e0eed87fc764b36
     container_name: redsl-db
     <<: *default-env
     environment:
@@ -75,7 +75,7 @@ services:
 
   # ── Mock GitHub OAuth (dev/test only) ──────────────────────────
   mock-github:
-    image: php:8.3-apache
+    image: php:8.3-apache@sha256:82c546aad03091876bfaa4dfd789767b1c462d75433991f1db38610254990f4e
     container_name: redsl-mock-github
     volumes:
       - ./mock-github:/var/www/html:ro

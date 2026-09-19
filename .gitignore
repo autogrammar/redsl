@@ -256,3 +256,26 @@ __marimo__/
 .nlp2dsl/
 .planfile/
 .taskill/
+
+!.github/
+!.github/**
+!.cursor/
+!.cursor/**
+!.cursor*
+!.aider*
+!.aider.conf.yml
+!scripts/
+!scripts/**
+!project/
+!project/**
+!.subactor/
+!.subactor/**
+
+# Repository-local worktrees and operational state
+/.worktrees/
+/.subactor/leases/
+/.subactor/sessions/
+/.subactor/recovery/
+/.subactor/receipts/
+/.subactor/cache/
+/.subactor/snapshots/

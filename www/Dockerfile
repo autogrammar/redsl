@@ -1,4 +1,4 @@
-FROM php:8.3-apache
+FROM php:8.3-apache@sha256:82c546aad03091876bfaa4dfd789767b1c462d75433991f1db38610254990f4e
 
 # System deps: YAML, curl (healthcheck), git, unzip
 RUN apt-get update && apt-get install -y \

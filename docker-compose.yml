@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   chroma:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:latest@sha256:ec27cd5af06c0561bd485ca3848ebf58c29c01e0beffcd69cd8db95d1ea356a4
     ports:
       - "8005:8000"
     volumes:

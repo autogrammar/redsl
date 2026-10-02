@@ -1,0 +1,1 @@
+SESSION_EXECUTION_AUTHORIZATION: User requested organization-wide Wellman adoption, preservation of worktrees/logs/docs guidelines and continued tests, push and protected merges. Old ticket-001 owner merge was verified and imported as lifecycle truth without inventing historical Validator approval. This ticket owns only declared governance metadata and the generated index repair.

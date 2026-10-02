@@ -8,8 +8,12 @@
     {
       "name": "governance / enforce",
       "workflowFile": ".github/workflows/new-project-governance.yml"
+    },
+    {
+      "name": "metadata",
+      "workflowFile": ".github/workflows/wellman.yml"
     }
   ],
   "schema": "new-project.required-checks/v1",
-  "version": 1
+  "version": 2
 }

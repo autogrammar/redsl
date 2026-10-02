@@ -1,0 +1,95 @@
+{
+  "schema": "new-project.intent/v3",
+  "ticket": "ticket-002",
+  "summary": "Adopt pinned Wellman metadata validation in ReDSL",
+  "workstream": "governance",
+  "classification": {
+    "kind": "FEATURE",
+    "priority": "P1",
+    "origin": "requested"
+  },
+  "allowedPaths": [
+    "project/ticket-002/**",
+    "TODO.md",
+    "project/TICKETS.md",
+    ".github/workflows/wellman.yml",
+    ".governance/docs.json",
+    ".governance/local-ci-publication.json",
+    ".governance/required-checks.json",
+    ".governance/standard-requirements.json",
+    "scripts/check-wellman.py"
+  ],
+  "forbiddenPaths": [
+    "project/ticket-*/user-*.md"
+  ],
+  "stacks": [],
+  "dependsOn": [],
+  "conflictsWith": [],
+  "integrationTicket": null,
+  "delivery": {
+    "acceptedBaseSha": "66feb3944b08bc37ed646818cecf31927edc06a7",
+    "targetBranch": "main",
+    "outcome": "Enforce pinned Wellman metadata validation and restore the target-owned allocator index markers.",
+    "nonGoals": [
+      "No product source changes",
+      "No managed package hash edits",
+      "No full standards-level certification"
+    ],
+    "complexity": "M",
+    "estimatedMinutes": 45,
+    "budgets": {
+      "maxImplementationFiles": 9,
+      "maxAffectedComponents": 3,
+      "maxPublicInterfaceChanges": 0,
+      "maxRuntimeDependencies": 1
+    },
+    "architecture": {
+      "status": "accepted",
+      "decision": "Compose independently merged Wellman 0.20.38 source with the existing new-project pin. Validate repository-bound requirements and Docs metadata using dependency-free Python -S and immutable source SHA. Preserve inherited product changes and repair only the target-owned index carrier.",
+      "components": [
+        {
+          "name": "governance",
+          "paths": [
+            ".governance/**",
+            ".github/workflows/wellman.yml",
+            "scripts/check-wellman.py"
+          ]
+        }
+      ],
+      "responsibilityChanges": false,
+      "interfaceChanges": [],
+      "dataChanges": [
+        {
+          "kind": "component-local-state",
+          "component": "governance",
+          "description": "Repository-bound requirements metadata only."
+        }
+      ],
+      "ui": {
+        "impact": "none",
+        "states": [],
+        "evidence": []
+      },
+      "rollback": "Revert adoption commit; preserve prior managed pin."
+    },
+    "runtimeDependencies": [
+      "wellman@73b4edcf3e74709734c755a4f68cbf328b7d6f5b"
+    ],
+    "validation": [
+      {
+        "criterion": "AC-01",
+        "commands": [
+          "python -S scripts/check-wellman.py"
+        ],
+        "evidence": "Requirements registration is idempotent and Docs metadata validates."
+      },
+      {
+        "criterion": "AC-02",
+        "commands": [
+          "bash project/governance-check.sh --actor agent"
+        ],
+        "evidence": "Scoped managed gate passes."
+      }
+    ]
+  }
+}

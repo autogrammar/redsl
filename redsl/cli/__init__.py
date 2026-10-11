@@ -57,6 +57,11 @@ __all__ = [
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.pass_context
 def cli(ctx: click.Context, verbose: bool) -> None:
+    try:
+        from .autoupdate import check_for_updates
+        check_for_updates("redsl")
+    except Exception:
+        pass
     """reDSL - Automated code refactoring tool."""
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose

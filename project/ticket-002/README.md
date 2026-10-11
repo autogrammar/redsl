@@ -2,7 +2,7 @@
 
 - **ID**: ticket-002
 - **Owner**: agent:codex
-- **Status**: IN_PROGRESS
+- **Status**: PLAN
 - **Workflow state**: EDIT
 - **Created**: 2026-10-02
 

@@ -115,7 +115,10 @@
           "events/**",
           "error/**",
           "models/**",
-          "proto/**"
+          "proto/**",
+          ".governance/manifest.json",
+          "redsl/**",
+          "tests/**"
         ]
       },
       "interfaces": {
